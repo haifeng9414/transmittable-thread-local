@@ -42,6 +42,8 @@ import java.util.concurrent.*;
  * @see TtlForkJoinPoolHelper
  * @since 0.9.0
  */
+// 封装jdk的Executor、ExecutorService、ScheduledExecutorService、ThreadFactory等线程池服务，这样提交Runnable的时候会自动
+// 用TtlRunnable.get封装一下
 public final class TtlExecutors {
     /**
      * {@link TransmittableThreadLocal} Wrapper of {@link Executor},

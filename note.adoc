@@ -1,0 +1,296 @@
+== 要解决的问题
+
+TransmittableThreadLocal(下面简称TTL)继承自JDK的ThreadLocal，用于解决InheritableThreadLocal在线程池的场景下，由于线程复用导致子线程只能获取到创建的那一时刻父线程中ThreadLocal的值，如下面的例子：
+
+[source, java]
+----
+public class Demo {
+    @Test
+    public void testInheritableThreadLocal() throws InterruptedException {
+        ThreadLocal<String> threadLocal = new InheritableThreadLocal<>();
+        threadLocal.set(UUID.randomUUID().toString().replace("-", ""));
+        System.out.println("主线程打印————" + Thread.currentThread().getName() + "：" + threadLocal.get());
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                System.out.println("子线程打印————" + Thread.currentThread().getName() + "："+ threadLocal.get());
+            }
+        }).start();
+
+        ExecutorService executorService = Executors.newFixedThreadPool(2);
+
+        for (int i = 0; i < 4; i++) {
+            executorService.execute(() -> {
+                System.out.println("线程池打印————"+Thread.currentThread().getName()+"：" + threadLocal.get());
+            });
+        }
+
+        Thread.sleep(3000L);
+        System.out.println("主线程修改ThreadLocal的值");
+        threadLocal.remove();
+        threadLocal.set(UUID.randomUUID().toString().replace("-", ""));
+        System.out.println("主线程打印————" + Thread.currentThread().getName() + "：" + threadLocal.get());
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                System.out.println("子线程打印————" + Thread.currentThread().getName() + "："+ threadLocal.get());
+            }
+        }).start();
+        try {
+            for (int i = 0; i < 4; i++) {
+                executorService.execute(() -> {
+                    System.out.println("线程池打印————"+Thread.currentThread().getName()+"：" + threadLocal.get());
+                });
+            }
+        } finally {
+            executorService.shutdown();
+        }
+    }
+}
+
+/*
+输出：
+主线程打印————main：f88d97208ff84773b323bc277a34c0c1
+子线程打印————Thread-0：f88d97208ff84773b323bc277a34c0c1
+线程池打印————pool-1-thread-1：f88d97208ff84773b323bc277a34c0c1
+线程池打印————pool-1-thread-1：f88d97208ff84773b323bc277a34c0c1
+线程池打印————pool-1-thread-1：f88d97208ff84773b323bc277a34c0c1
+线程池打印————pool-1-thread-2：f88d97208ff84773b323bc277a34c0c1
+主线程修改ThreadLocal的值
+主线程打印————main：d74bb2d9e1da4b14a01ffae541ddd983
+子线程打印————Thread-1：d74bb2d9e1da4b14a01ffae541ddd983
+线程池打印————pool-1-thread-1：f88d97208ff84773b323bc277a34c0c1
+线程池打印————pool-1-thread-2：f88d97208ff84773b323bc277a34c0c1
+线程池打印————pool-1-thread-2：f88d97208ff84773b323bc277a34c0c1
+线程池打印————pool-1-thread-1：f88d97208ff84773b323bc277a34c0c1
+ */
+----
+
+可以看到InheritableThreadLocal解决了子线程获取主线程ThreadLocal的问题，但是当主线程更新ThreadLocal的值后，线程池中被复用的线程拿到的还是更新前的值，这是因为InheritableThreadLocal的实现机制是在线程创建的时候获取主线程中ThreadLocal的值，在之后就没有获取的机会了。
+
+TTL的实现本质上就是将获取主线程ThreadLocal的值从线程创建的那一时刻，改成在创建任务的时候获取，并在子线程执行任务时将获取到的值更新到子线程的ThreadLocal，核心逻辑可以用下面的例子理解：
+
+[source,java]
+----
+public class SimpleTransmittableThreadLocal {
+    public static class SimpleThreadLocal {
+        private static final ThreadLocal<Map<String, Object>> copyOnThreadLocal = new ThreadLocal<>();
+
+        public static Map<String, Object> get() {
+            return copyOnThreadLocal.get();
+        }
+
+        public static void put(Map<String, Object> val) {
+            copyOnThreadLocal.set(val);
+        }
+
+        public static void remove() {
+            copyOnThreadLocal.remove();
+        }
+    }
+
+    public static class SimpleRunnable implements Runnable {
+
+        private final Runnable runnable;
+        private static Map<String, Object> threadLocal;
+
+        public SimpleRunnable(Runnable runnable) {
+            this.runnable = runnable;
+            threadLocal = SimpleThreadLocal.get();
+        }
+
+        @Override
+        public void run() {
+            SimpleThreadLocal.put(threadLocal);
+            runnable.run();
+            SimpleThreadLocal.remove();
+        }
+    }
+
+    @Test
+    public void testSimpleThreadLocal() throws InterruptedException {
+        Map<String, Object> map = new HashMap<>();
+        map.put("UUID", UUID.randomUUID().toString().replace("-", ""));
+        SimpleThreadLocal.put(map);
+        System.out.println("主线程打印————" + Thread.currentThread().getName() + "：" + SimpleThreadLocal.get().get("UUID"));
+
+        ExecutorService executorService = Executors.newFixedThreadPool(2);
+
+        for (int i = 0; i < 4; i++) {
+            executorService.execute(new SimpleRunnable(new Runnable() {
+                @Override
+                public void run() {
+                    System.out.println(
+                            "线程池打印————" + Thread.currentThread().getName() + "：" + SimpleThreadLocal.get().get("UUID"));
+                }
+            }));
+        }
+
+        Thread.sleep(3000L);
+        System.out.println("主线程修改ThreadLocal的值");
+        map = new HashMap<>();
+        map.put("UUID", UUID.randomUUID().toString().replace("-", ""));
+        SimpleThreadLocal.put(map);
+        System.out.println("主线程打印————" + Thread.currentThread().getName() + "：" + SimpleThreadLocal.get().get("UUID"));
+        try {
+            for (int i = 0; i < 4; i++) {
+                executorService.execute(new SimpleRunnable(new Runnable() {
+                    @Override
+                    public void run() {
+                        System.out.println(
+                                "线程池打印————" + Thread.currentThread().getName() + "：" + SimpleThreadLocal.get()
+                                        .get("UUID"));
+                    }
+                }));
+            }
+        } finally {
+            executorService.shutdown();
+        }
+    }
+}
+/*
+输出：
+主线程打印————main：22c5c986fbd647fb896f30d20e11c99b
+线程池打印————pool-1-thread-1：22c5c986fbd647fb896f30d20e11c99b
+线程池打印————pool-1-thread-2：22c5c986fbd647fb896f30d20e11c99b
+线程池打印————pool-1-thread-1：22c5c986fbd647fb896f30d20e11c99b
+线程池打印————pool-1-thread-2：22c5c986fbd647fb896f30d20e11c99b
+主线程修改ThreadLocal的值
+主线程打印————main：495ea40b552e48d59279ee2b7e32c5a0
+线程池打印————pool-1-thread-1：495ea40b552e48d59279ee2b7e32c5a0
+线程池打印————pool-1-thread-2：495ea40b552e48d59279ee2b7e32c5a0
+线程池打印————pool-1-thread-2：495ea40b552e48d59279ee2b7e32c5a0
+线程池打印————pool-1-thread-1：495ea40b552e48d59279ee2b7e32c5a0
+ */
+----
+
+可以看到主线程修改ThreadLocal的值后，线程池中被复用的线程可以获取到修改后的值，这是因为通过SimpleRunnable这个包装类，在创建任务时保存了主线程ThreadLocal的值，并在run方法中将值更新到子线程的ThreadLocal。
+
+TTL的实现也是这个思路，只是处理了一些细节，提供了一些扩展，下面看看TTL的实现。
+
+== TTL的实现
+TTL提供了两种使用方式：
+
+=== 修饰Runnable和Callable
+.通过TtlRunnable工具类修饰Runnable和Callable
+[source, java]
+----
+public class MyDemo {
+    private static final TransmittableThreadLocal<String> context = new TransmittableThreadLocal<>();
+
+    @Test
+    public void testTtlRunnable() throws InterruptedException {
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        Runnable task = new RunnableTask();
+
+        // 在父线程中设置
+        context.set("init-value");
+        executorService.submit(TtlRunnable.get(task));
+
+        // 在父线程中设置
+        context.set("value-set-in-parent");
+        executorService.submit(TtlRunnable.get(task));
+        executorService.awaitTermination(10, TimeUnit.SECONDS);
+    }
+
+    public static class RunnableTask implements Runnable {
+        @Override
+        public void run() {
+            try {
+                TimeUnit.SECONDS.sleep(1);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+            System.out.println(context.get());
+        }
+    }
+}
+
+/*
+输出：
+init-value
+value-set-in-parent
+ */
+----
+
+=== 修饰线程池
+.通过TtlExecutors工具类修饰线程池
+[source, java]
+----
+public class MyDemo {
+    private static final TransmittableThreadLocal<String> context = new TransmittableThreadLocal<>();
+
+    @Test
+    public void testTtlExecutors() throws InterruptedException {
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService = TtlExecutors.getTtlExecutorService(executorService);
+        Runnable task = new RunnableTask();
+
+        // 在父线程中设置
+        context.set("init-value");
+        executorService.submit(task);
+
+        // 在父线程中设置
+        context.set("value-set-in-parent");
+        executorService.submit(task);
+        executorService.awaitTermination(10, TimeUnit.SECONDS);
+    }
+
+
+    public static class RunnableTask implements Runnable {
+        @Override
+        public void run() {
+            try {
+                TimeUnit.SECONDS.sleep(1);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+            System.out.println(context.get());
+        }
+    }
+}
+
+/*
+输出：
+init-value
+value-set-in-parent
+ */
+----
+
+修饰线程池的方式本质上和修饰Runnable和Callable是一样的，TtlExecutors使用装饰器模式将提交到线程池的Runnable和Callable通过TtlRunnable进行修饰，下面就看看TtlRunnable的实现。
+
+=== 实现
+==== 使用TTL整个过程的时序图
+image::docs/my/TTL完整时序图.png[ttl]
+
+TtlRunnable类的核心代码在其构造函数和run方法：
+
+[source, java]
+----
+public final class TtlRunnable implements Runnable, TtlWrapper<Runnable>, TtlEnhanced, TtlAttachments {
+    private final AtomicReference<Object> capturedRef;
+    private final Runnable runnable;
+    private final boolean releaseTtlValueReferenceAfterRun;
+
+    private TtlRunnable(@NonNull Runnable runnable, boolean releaseTtlValueReferenceAfterRun) {
+        this.capturedRef = new AtomicReference<>(capture());
+        this.runnable = runnable;
+        this.releaseTtlValueReferenceAfterRun = releaseTtlValueReferenceAfterRun;
+    }
+
+    @Override
+    public void run() {
+        final Object captured = capturedRef.get();
+        if (captured == null || releaseTtlValueReferenceAfterRun && !capturedRef.compareAndSet(captured, null)) {
+            throw new IllegalStateException("TTL value reference is released after run!");
+        }
+
+        final Object backup = replay(captured);
+        try {
+            runnable.run();
+        } finally {
+            restore(backup);
+        }
+    }
+}
+----

@@ -1,0 +1,44 @@
+@startuml
+hide footbox
+
+autonumber
+
+participant 业务代码 as bizCode
+participant Runnable as runnable
+participant TtlRunnable as ttlRunnable
+participant ThreadLocal as tl
+participant ThreadPool as threadPool
+participant TransmittableThreadLocal as ttl
+participant Transmitter as transmitter
+participant Holder as holder
+
+bizCode -> ttl: 创建TTL
+bizCode -> ttl: 设置值
+ttl -> tl: 保存值到ThreadLocal
+ttl -> holder: 将自己添加到holder
+bizCode -> runnable: 创建业务代码Runnable
+bizCode -> ttlRunnable: 创建TtlRunnable
+ttlRunnable -> transmitter: 调用capture()获取主线程ttl的值
+transmitter -> holder: 遍历获取所有ttl
+transmitter -> ttl: 调用copyValue()复制ttl的值
+bizCode -> threadPool: 执行ttlRunnable
+threadPool -> ttlRunnable: run()
+ttlRunnable -> ttl: beforeExecute()
+ttlRunnable -> transmitter: replay()
+transmitter -> holder: 遍历获取所有ttl
+transmitter -> ttl: 调用get()获取ttl的值作为backup
+transmitter -> tl: 将从capture()方法获取到的值到设置到ThreadLocal
+ttlRunnable -> runnable: 执行业务代码
+activate ttlRunnable
+activate runnable
+runnable -> tl: 获取threadLocal值
+runnable -> ttlRunnable: 结束执行
+deactivate runnable
+ttlRunnable -> transmitter: restore()
+transmitter -> holder: 遍历获取所有ttl
+transmitter -> ttl: 调用set()恢复从replay()获取到的值
+ttl -> tl: 保存值到ThreadLocal
+ttlRunnable -> ttl: afterExecute()
+deactivate ttlRunnable
+
+@enduml

@@ -68,6 +68,7 @@ import java.util.logging.Logger;
 public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> implements TtlCopier<T> {
     private static final Logger logger = Logger.getLogger(TransmittableThreadLocal.class.getName());
 
+    // 如果value是null的情况下，是否添加到threadlocal中，为true表示添加，否则不添加
     private final boolean disableIgnoreNullValueSemantics;
 
     /**
@@ -128,6 +129,7 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
      */
     @NonNull
     @SuppressWarnings("ConstantConditions")
+    // 创建一个实现了initialValue的threadlocal
     public static <S> TransmittableThreadLocal<S> withInitial(@NonNull Supplier<? extends S> supplier) {
         if (supplier == null) throw new NullPointerException("supplier is null");
 
@@ -196,6 +198,7 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
      * An extension of ThreadLocal that obtains its initial value from the specified {@code Supplier}
      * and obtains its child value and transmitting value from the specified ttl copier.
      */
+    // 支持initialValue和值传输时进行copy操作的threadlocal
     private static final class SuppliedTransmittableThreadLocal<T> extends TransmittableThreadLocal<T> {
         private final Supplier<? extends T> supplier;
         private final TtlCopier<T> copierForChildValue;
@@ -240,6 +243,7 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
      * @since 1.0.0
      */
     public T copy(T parentValue) {
+        // 不进行copy，需要的话可以使用SuppliedTransmittableThreadLocal指定copy操作
         return parentValue;
     }
 
@@ -330,8 +334,11 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
             };
 
     @SuppressWarnings("unchecked")
+    // 把当前threadlocal保存到holder中
     private void addThisToHolder() {
         if (!holder.get().containsKey(this)) {
+            // holder只是为了引用所有的TransmittableThreadLocal，value为null可以在TransmittableThreadLocal不被业务代码强引用
+            // 的时候进行内存回收
             holder.get().put((TransmittableThreadLocal<Object>) this, null); // WeakHashMap supports null value.
         }
     }
@@ -510,6 +517,7 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
                     }
                 }
             }
+            // Snapshot只是持有transmittee2Value
             return new Snapshot(transmittee2Value);
         }
 
@@ -526,6 +534,7 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
         public static Object replay(@NonNull Object captured) {
             final Snapshot capturedSnapshot = (Snapshot) captured;
 
+            // 这里transmittee2Value的key是transmitteeSet中的元素，value是对应Transmittee的capture返回值
             final HashMap<Transmittee<Object, Object>, Object> transmittee2Value = new HashMap<>(capturedSnapshot.transmittee2Value.size());
             for (Map.Entry<Transmittee<Object, Object>, Object> entry : capturedSnapshot.transmittee2Value.entrySet()) {
                 Transmittee<Object, Object> transmittee = entry.getKey();
@@ -721,6 +730,7 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
                     @NonNull
                     @Override
                     public HashMap<TransmittableThreadLocal<Object>, Object> capture() {
+                        // 拷贝一份holder中的数据并返回，holder中保存了所有的TransmittableThreadLocal
                         final HashMap<TransmittableThreadLocal<Object>, Object> ttl2Value = new HashMap<>(holder.get().size());
                         for (TransmittableThreadLocal<Object> threadLocal : holder.get().keySet()) {
                             ttl2Value.put(threadLocal, threadLocal.copyValue());
@@ -737,10 +747,17 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
                             TransmittableThreadLocal<Object> threadLocal = iterator.next();
 
                             // backup
+                            // 这里调用的是threadLocal的get方法而不是copy，replay的目的是备份父线程的值，防止业务代码在执行时
+                            // 修改的threadLocal值在holder中生效
                             backup.put(threadLocal, threadLocal.get());
 
                             // clear the TTL values that is not in captured
                             // avoid the extra TTL values after replay when run task
+                            // 上面的backup已经备份了holder中所有的threadLocal，这里在发现当前线程的captured中没有当前的threadLocal
+                            // 则将其从holder中暂时移除，避免业务代码在执行的时候holder中的threadLocal数量和captured中的threadLocal
+                            // 数量不一致
+                            // holder是InheritableThreadLocal类型的，所以可以很安全的remove，并在之后进行restore操作而不影响其他
+                            // 线程
                             if (!captured.containsKey(threadLocal)) {
                                 iterator.remove();
                                 threadLocal.superRemove();
@@ -748,9 +765,11 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
                         }
 
                         // set TTL values to captured
+                        // 将captured的值保存到threadlocal中，set进去的value是在capture方法执行时holder中的threadLocal的copyValue
                         setTtlValuesTo(captured);
 
                         // call beforeExecute callback
+                        // 调用所有threadlocal的beforeExecute方法
                         doExecuteCallback(true);
 
                         return backup;
@@ -759,14 +778,19 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
                     @NonNull
                     @Override
                     public HashMap<TransmittableThreadLocal<Object>, Object> clear() {
+                        // 传一个空的map使得业务代码执行期间holder为空，执行完会通过restore恢复holder的值
                         return replay(new HashMap<>(0));
                     }
 
                     @Override
                     public void restore(@NonNull HashMap<TransmittableThreadLocal<Object>, Object> backup) {
                         // call afterExecute callback
+                        // 调用所有threadlocal的afterExecute方法
                         doExecuteCallback(false);
 
+                        // 这里遍历holder是为了过滤掉在capture方法执行后保存的所有threadLocal中不存在的threadLocal
+                        // 这些threadLocal可能是业务方法在执行时put到holder的，这里为了保证capture方法执行前和restore
+                        // 方法执行后holder的threadLocal是一致的
                         for (final Iterator<TransmittableThreadLocal<Object>> iterator = holder.get().keySet().iterator(); iterator.hasNext(); ) {
                             TransmittableThreadLocal<Object> threadLocal = iterator.next();
 
@@ -779,6 +803,7 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
                         }
 
                         // restore TTL values
+                        // 将backup的值保存到threadlocal中
                         setTtlValuesTo(backup);
                     }
                 };
@@ -844,6 +869,7 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
                     }
                 };
 
+        // 下面的registerTransmittee方法会把ttlTransmittee和threadLocalTransmittee添加到transmitteeSet中
         private static final Set<Transmittee<Object, Object>> transmitteeSet = new CopyOnWriteArraySet<>();
 
         static {
