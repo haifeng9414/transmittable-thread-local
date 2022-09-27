@@ -19,7 +19,7 @@
 <a href="https://gitpod.io/#https://github.com/alibaba/transmittable-thread-local"><img src="https://img.shields.io/badge/Gitpod-ready--to--code-green?label=gitpod&logo=gitpod&logoColor=white" alt="gitpod: Ready to Code"></a>
 </p>
 
-[📖 English Documentation](README-EN.md) | 📖 中文文档
+[📖 English Documentation](README-EN.md) | 📖 中文文档 | [📖 笔记](note.adoc)
 
 ----------------------------------------
 
