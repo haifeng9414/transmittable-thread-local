@@ -481,3 +481,100 @@ public static Object replay(@NonNull Object captured) {
     return new Snapshot(transmittee2Value);
 }
 ----
+
+replay()方法遍历captured中的Transmittee对象并分别调用replay()方法，这里主要看ttlTransmittee对象的实现，其replay()方法代码如下：
+----
+@NonNull
+@Override
+public HashMap<TransmittableThreadLocal<Object>, Object> replay(@NonNull HashMap<TransmittableThreadLocal<Object>, Object> captured) {
+    final HashMap<TransmittableThreadLocal<Object>, Object> backup = new HashMap<>(holder.get().size());
+
+    for (final Iterator<TransmittableThreadLocal<Object>> iterator = holder.get().keySet().iterator(); iterator.hasNext(); ) {
+        TransmittableThreadLocal<Object> threadLocal = iterator.next();
+
+        // backup
+        // 这里调用的是threadLocal的get方法而不是copy，replay的目的是备份父线程的值，防止业务代码在执行时
+        // 修改的threadLocal值在holder中生效
+        backup.put(threadLocal, threadLocal.get());
+
+        // clear the TTL values that is not in captured
+        // avoid the extra TTL values after replay when run task
+        // 上面的backup已经备份了holder中所有的threadLocal，这里在发现当前线程的captured中没有当前的threadLocal
+        // 则将其从holder中暂时移除，避免业务代码在执行的时候holder中的threadLocal数量和captured中的threadLocal
+        // 数量不一致
+        // holder是InheritableThreadLocal类型的，所以可以很安全的remove，并在之后进行restore操作而不影响其他
+        // 线程
+        if (!captured.containsKey(threadLocal)) {
+            iterator.remove();
+            threadLocal.superRemove();
+        }
+    }
+
+    // set TTL values to captured
+    // 将captured的值保存到threadlocal中，set进去的value是在capture方法执行时holder中的threadLocal的copyValue
+    setTtlValuesTo(captured);
+
+    // call beforeExecute callback
+    // 调用所有threadlocal的beforeExecute方法
+    doExecuteCallback(true);
+
+    return backup;
+}
+
+private static void setTtlValuesTo(@NonNull HashMap<TransmittableThreadLocal<Object>, Object> ttlValues) {
+    for (Map.Entry<TransmittableThreadLocal<Object>, Object> entry : ttlValues.entrySet()) {
+        TransmittableThreadLocal<Object> threadLocal = entry.getKey();
+        threadLocal.set(entry.getValue());
+    }
+}
+----
+
+ttlTransmittee对象的replay()方法首先通过holder遍历父线程持有的所有ttl对象，逐个调用get()方法对父线程中ttl的值进行备份，之后判断当前子线程captured的ttl对象中是否存在主线程中的ttl，不存在的话则从holder中暂时移除该ttl，这是为了避免子线程运行时其captured的ttl数量和holder中ttl的数量不一致。
+
+循环结束后将captured中ttl的值设置到了当前运行的子线程的threadLocal中，并返回主线程holder中的备份，这之后子线程运行业务代码就可以获取到TtlRunnable对象创建的那个时刻获取到的父线程ttl的值。
+
+TtlRunnable的run()方法最后执行restore()对replay()方法获取到的备份进行恢复，代码如下：
+----
+public static void restore(@NonNull Object backup) {
+    for (Map.Entry<Transmittee<Object, Object>, Object> entry : ((Snapshot) backup).transmittee2Value.entrySet()) {
+        Transmittee<Object, Object> transmittee = entry.getKey();
+        try {
+            Object transmitteeBackup = entry.getValue();
+            transmittee.restore(transmitteeBackup);
+        } catch (Throwable t) {
+            if (logger.isLoggable(Level.WARNING)) {
+                logger.log(Level.WARNING, "exception when Transmitter.restore for transmittee " + transmittee +
+                        "(class " + transmittee.getClass().getName() + "), just ignored; cause: " + t, t);
+            }
+        }
+    }
+}
+----
+
+参数backup就是前面说到的replay()方法的返回值，包含了更新子线程threadLocal之前主线程holder中所有的ttl对象及ttl的值，恢复备份的过程和replay()方法获取备份的过程类似，主要是将backup中所有的ttl恢复到holder中，ttlTransmittee对象的restore()方法代码实现如下：
+----
+@Override
+public void restore(@NonNull HashMap<TransmittableThreadLocal<Object>, Object> backup) {
+    // call afterExecute callback
+    // 调用所有threadlocal的afterExecute方法
+    doExecuteCallback(false);
+
+    // 这里遍历holder是为了过滤掉在capture方法执行后保存的所有threadLocal中不存在的threadLocal
+    // 这些threadLocal可能是业务方法在执行时put到holder的，这里为了保证capture方法执行前和restore
+    // 方法执行后holder的threadLocal是一致的
+    for (final Iterator<TransmittableThreadLocal<Object>> iterator = holder.get().keySet().iterator(); iterator.hasNext(); ) {
+        TransmittableThreadLocal<Object> threadLocal = iterator.next();
+
+        // clear the TTL values that is not in backup
+        // avoid the extra TTL values after restore
+        if (!backup.containsKey(threadLocal)) {
+            iterator.remove();
+            threadLocal.superRemove();
+        }
+    }
+
+    // restore TTL values
+    // 将backup的值保存到threadlocal中
+    setTtlValuesTo(backup);
+}
+----
