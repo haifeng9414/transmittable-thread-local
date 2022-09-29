@@ -27,7 +27,7 @@ public class MyDemo {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                System.out.println("子线程打印————" + Thread.currentThread().getName() + "："+ threadLocal.get());
+                System.out.println("子线程打印————" + Thread.currentThread().getName() + "：" + threadLocal.get());
             }
         }).start();
 
@@ -35,7 +35,7 @@ public class MyDemo {
 
         for (int i = 0; i < 4; i++) {
             executorService.execute(() -> {
-                System.out.println("线程池打印————"+Thread.currentThread().getName()+"：" + threadLocal.get());
+                System.out.println("线程池打印————" + Thread.currentThread().getName() + "：" + threadLocal.get());
             });
         }
 
@@ -47,13 +47,13 @@ public class MyDemo {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                System.out.println("子线程打印————" + Thread.currentThread().getName() + "："+ threadLocal.get());
+                System.out.println("子线程打印————" + Thread.currentThread().getName() + "：" + threadLocal.get());
             }
         }).start();
         try {
             for (int i = 0; i < 4; i++) {
                 executorService.execute(() -> {
-                    System.out.println("线程池打印————"+Thread.currentThread().getName()+"：" + threadLocal.get());
+                    System.out.println("线程池打印————" + Thread.currentThread().getName() + "：" + threadLocal.get());
                 });
             }
         } finally {
@@ -135,6 +135,28 @@ public class MyDemo {
         // 在父线程中设置
         context.set("value-set-in-parent");
         executorService.submit(task);
+        executorService.awaitTermination(10, TimeUnit.SECONDS);
+    }
+
+    @Test
+    public void test() throws InterruptedException {
+        TransmittableThreadLocal<String> context = new TransmittableThreadLocal<>();
+
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        executorService = TtlExecutors.getTtlExecutorService(executorService);
+        // 在父线程中设置
+        context.set("init-value");
+        executorService.submit(() -> {
+            System.out.println("context: " + context.get());
+        });
+
+        // 在父线程中设置
+        context.set("value-set-in-parent");
+        context.remove();
+        TimeUnit.SECONDS.sleep(1);
+        executorService.submit(() -> {
+            System.out.println("context: " + context.get());
+        });
         executorService.awaitTermination(10, TimeUnit.SECONDS);
     }
 

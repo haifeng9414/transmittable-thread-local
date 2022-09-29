@@ -730,7 +730,8 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
                     @NonNull
                     @Override
                     public HashMap<TransmittableThreadLocal<Object>, Object> capture() {
-                        // 拷贝一份holder中的数据并返回，holder中保存了所有的TransmittableThreadLocal
+                        // 拷贝一份holder中的数据并返回，capture的执行时机是TtlRunnable对象创建的时候，运行环境还在主线程，所以
+                        // holder中保存的是主线程所有的TransmittableThreadLocal
                         final HashMap<TransmittableThreadLocal<Object>, Object> ttl2Value = new HashMap<>(holder.get().size());
                         for (TransmittableThreadLocal<Object> threadLocal : holder.get().keySet()) {
                             ttl2Value.put(threadLocal, threadLocal.copyValue());
@@ -743,19 +744,21 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
                     public HashMap<TransmittableThreadLocal<Object>, Object> replay(@NonNull HashMap<TransmittableThreadLocal<Object>, Object> captured) {
                         final HashMap<TransmittableThreadLocal<Object>, Object> backup = new HashMap<>(holder.get().size());
 
+                        // replay的执行环境已经在子线程了，这里的holder就是子线程创建的那一时刻从主线程的holder继承下来的所有
+                        // 的TransmittableThreadLocal
                         for (final Iterator<TransmittableThreadLocal<Object>> iterator = holder.get().keySet().iterator(); iterator.hasNext(); ) {
                             TransmittableThreadLocal<Object> threadLocal = iterator.next();
 
                             // backup
-                            // 这里调用的是threadLocal的get方法而不是copy，replay的目的是备份父线程的值，防止业务代码在执行时
-                            // 修改的threadLocal值在holder中生效
+                            // 这里调用的是threadLocal的get方法而不是copy，replay的目的是备份当前线程创建的那一时刻holder中的数据
+                            // 用于之后的restore，保证当前线程每次开始执行的时候holder中的的TransmittableThreadLocal对象和
+                            // 当前线程创建的那一时刻是一致的
                             backup.put(threadLocal, threadLocal.get());
 
                             // clear the TTL values that is not in captured
                             // avoid the extra TTL values after replay when run task
                             // 上面的backup已经备份了holder中所有的threadLocal，这里在发现当前线程的captured中没有当前的threadLocal
-                            // 则将其从holder中暂时移除，避免业务代码在执行的时候holder中的threadLocal数量和captured中的threadLocal
-                            // 数量不一致
+                            // 则将其从holder中暂时移除，避免业务代码在执行的时候感知到已经被remove的无用TransmittableThreadLocal
                             // holder是InheritableThreadLocal类型的，所以可以很安全的remove，并在之后进行restore操作而不影响其他
                             // 线程
                             if (!captured.containsKey(threadLocal)) {
@@ -789,8 +792,9 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
                         doExecuteCallback(false);
 
                         // 这里遍历holder是为了过滤掉在capture方法执行后保存的所有threadLocal中不存在的threadLocal
-                        // 这些threadLocal可能是业务方法在执行时put到holder的，这里为了保证capture方法执行前和restore
-                        // 方法执行后holder的threadLocal是一致的
+                        // 这些threadLocal可能是业务方法在执行时新建了TransmittableThreadLocal对象并调用get/set方法而添加
+                        // 到holder的，这些TransmittableThreadLocal对象没必要留在当前线程的holder中，下一次线程运行的时候
+                        // 是不需要这些TransmittableThreadLocal对象的
                         for (final Iterator<TransmittableThreadLocal<Object>> iterator = holder.get().keySet().iterator(); iterator.hasNext(); ) {
                             TransmittableThreadLocal<Object> threadLocal = iterator.next();
 
@@ -804,6 +808,11 @@ public class TransmittableThreadLocal<T> extends InheritableThreadLocal<T> imple
 
                         // restore TTL values
                         // 将backup的值保存到threadlocal中
+                        // 通过replay和restore方法也可以发现，子线程的holder中保存的始终是创建的那一时刻从主线程的holder中继
+                        // 承下来的TransmittableThreadLocal对象，当主线程执行TransmittableThreadLocal.remove从自己的holder
+                        // 中删除了TransmittableThreadLocal对象，那子线程的holder还一直持有这个TransmittableThreadLocal是不
+                        // 是就内存泄露了呢，实际上不会，因为holder的value是WeakHashMap的，当TransmittableThreadLocal对象没有
+                        // 强引用的时候，是可以被垃圾回收的
                         setTtlValuesTo(backup);
                     }
                 };

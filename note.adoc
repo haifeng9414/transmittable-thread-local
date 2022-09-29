@@ -172,6 +172,7 @@ TTL的实现也是这个思路，只是处理了一些细节，提供了一些�
 TTL提供了两种使用方式：
 
 === 修饰Runnable和Callable
+
 .通过TtlRunnable工具类修饰Runnable和Callable
 [source, java]
 ----
@@ -214,6 +215,7 @@ value-set-in-parent
 ----
 
 === 修饰线程池
+
 .通过TtlExecutors工具类修饰线程池
 [source, java]
 ----
@@ -296,8 +298,9 @@ public final class TtlRunnable implements Runnable, TtlWrapper<Runnable>, TtlEnh
 ----
 
 TtlRunnable的构造函数会调用Transmitter的capture()方法：
+
+[source, java]
 ----
-@NonNull
 public static Object capture() {
     final HashMap<Transmittee<Object, Object>, Object> transmittee2Value = new HashMap<>(transmitteeSet.size());
     for (Transmittee<Object, Object> transmittee : transmitteeSet) {
@@ -317,6 +320,7 @@ public static Object capture() {
 
 capture()方法遍历transmitteeSet中的Transmittee对象（注意这里是Transmittee类而不是Transmitter类）并调用其capture()方法，而transmitteeSet的初始化代码如下：
 
+[source, java]
 ----
 // 下面的registerTransmittee方法会把ttlTransmittee和threadLocalTransmittee添加到transmitteeSet中
 private static final Set<Transmittee<Object, Object>> transmitteeSet = new CopyOnWriteArraySet<>();
@@ -342,17 +346,18 @@ public interface Transmittee<C, B> {
 }
 ----
 
-ttlTransmittee和threadLocalTransmittee会被添加到transmitteeSet中，而Transmitter类的capture()方法会遍历transmitteeSet中的Transmittee对象，逐个执行Transmittee对象的capture()方法，这里需要注意区分Transmitter类和Transmittee类，Transmitter类的作用是作为一个静态工具类，遍历transmitteeSet中的Transmittee对象，帮助TtlRunnable完成后面说到的CRR模式，Transmitter类的实现在下面会分析。
+ttlTransmittee和threadLocalTransmittee会被添加到transmitteeSet中，而Transmitter类的capture()方法会遍历transmitteeSet中的Transmittee对象，逐个执行Transmittee对象的capture()方法，这里需要注意区分Transmitter类和Transmittee类，Transmitter类的作用是作为一个静态工具类，遍历transmitteeSet中的Transmittee对象，帮助TtlRunnable完成CRR模式，Transmitter类的实现在下面会分析。
 
 Transmittee接口定义了transmittable-thread-local的README中说到的link:docs/developer-guide.md[**_`CRR(capture/replay/restore)`模式_**]：
 
-1. capture方法：抓取线程（线程A）的所有TTL值。
-2. replay方法：在另一个线程（线程B）中，回放在capture方法中抓取的TTL值，并返回回放前TTL值的备份
-3. restore方法：恢复线程B执行replay方法之前的TTL值（即备份）
+1. capture方法：抓取线程（主线程）的所有TTL值。
+2. replay方法：在另一个线程（子线程）中，回放在capture方法中抓取的TTL值，并返回回放前TTL值的备份
+3. restore方法：恢复子线程执行replay方法之前的TTL值（即备份）
 
 ttl的核心就是CRR的过程，下面看看CRR的过程是怎么实现的，首先是前面提到的capture()，该方法的实现首先是在Transmitter类中，代码如下：
+
+[source, java]
 ----
-@NonNull
 public static Object capture() {
     final HashMap<Transmittee<Object, Object>, Object> transmittee2Value = new HashMap<>(transmitteeSet.size());
     for (Transmittee<Object, Object> transmittee : transmitteeSet) {
@@ -374,22 +379,26 @@ public static Object capture() {
 Transmitter类的capture()方法遍历transmitteeSet中的ttlTransmittee和threadLocalTransmittee这两个Transmittee实现类。分别调用其capture()方法并保存到map，最终map会被封装到Snapshot对象作为TtlRunnable对象的captured属性，用于之后的replay过程。
 
 transmitteeSet中的ttlTransmittee是TransmittableThreadLocal实现CRR的核心，threadLocalTransmittee的作用是支持注册自定义的ThreadLocal，使其具备和TransmittableThreadLocal一样的能力，原理和ttlTransmittee是一样的，所以下面主要看ttlTransmittee的实现，ttlTransmittee中capture()的实现
+
+[source, java]
 ----
-@NonNull
-@Override
 public HashMap<TransmittableThreadLocal<Object>, Object> capture() {
-// 拷贝一份holder中的数据并返回，holder中保存了所有的TransmittableThreadLocal
-final HashMap<TransmittableThreadLocal<Object>, Object> ttl2Value = new HashMap<>(holder.get().size());
+    // 拷贝一份holder中的数据并返回，capture的执行时机是TtlRunnable对象创建的时候，运行环境还在主线程，所以
+    // holder中保存的是主线程所有的TransmittableThreadLocal
+    final HashMap<TransmittableThreadLocal<Object>, Object> ttl2Value = new HashMap<>(holder.get().size());
     for (TransmittableThreadLocal<Object> threadLocal : holder.get().keySet()) {
         ttl2Value.put(threadLocal, threadLocal.copyValue());
     }
     return ttl2Value;
 }
 ----
+
 ttlTransmittee的capture()方法遍历holder获取ttl对象并调用copyValue方法复制ttl对象的值，copyValue()方法默认实现是直接返回ttl的值，可以通过
 ttl的子类SuppliedTransmittableThreadLocal重写copyValue()方法的实现。最终capture()方法会返回一个以holder中所有ttl为key，ttl的copyValue为value的Map。
 
 holder中的ttl对象又是哪来的呢？可以看ttl的get()和set()方法的实现：
+
+[source, java]
 ----
 @Override
 public final T get() {
@@ -411,6 +420,8 @@ public final void set(T value) {
 ----
 
 ttl的get()和set()方法在被调用后，都会执行addThisToHolder()方法，将ttl自己添加到holder中，holder的定义和该方法的实现如下：
+
+[source, java]
 ----
 private static final InheritableThreadLocal<WeakHashMap<TransmittableThreadLocal<Object>, ?>> holder =
         new InheritableThreadLocal<WeakHashMap<TransmittableThreadLocal<Object>, ?>>() {
@@ -438,7 +449,9 @@ holder是一个InheritableThreadLocal对象，持有WeakHashMap。从ttl的时�
 
 总结一下CRR模式中的C的作用，在TtlRunnable的构造函数遍历所有主线程中的ttl对象，分别调用copyValue方法并保存到map中，最终保存到TtlRunnable对象的captured属性，也就是捕获主线程所有的ttl对象及ttl对象的copyValue。
 
-CRR模式中第一个R的作用是replay，简单来说是更新子线程ttl的值为C阶段捕获到的主线程的ttl值，其执行的时机是TtlRunnable对象的run()方法，注意TtlRunnable对象的run()方法运行环境已经是子线程了，其代码如下：
+接下来看看CRR模式中第一个R的作用，即replay，简单来说是更新子线程ttl的值为C阶段捕获到的主线程的ttl值，其执行的时机是TtlRunnable对象的run()方法，注意TtlRunnable对象的run()方法运行环境已经是子线程了，其代码如下：
+
+[source, java]
 ----
 @Override
 public void run() {
@@ -459,6 +472,8 @@ public void run() {
 captured对象就是前面说到的Transmitter类的capture()方法返回的Snapshot对象，通过这个Snapshot对象能够获取到ttlTransmittee对象（实际上还有threadLocalTransmittee，原理是一样的，这里就忽略了），及主线程所有ttl对象和ttl的copyValue（实际上只是TtlRunnable对象在创建的那一刻主线程所有的ttl，创建之后主线程新持有的ttl是没有的）。
 
 captured对象作为replay()方法的入参，replay()方法的实现在Transmitter类，代码如下：
+
+[source, java]
 ----
 @NonNull
 public static Object replay(@NonNull Object captured) {
@@ -483,25 +498,27 @@ public static Object replay(@NonNull Object captured) {
 ----
 
 replay()方法遍历captured中的Transmittee对象并分别调用replay()方法，这里主要看ttlTransmittee对象的实现，其replay()方法代码如下：
+
+[source, java]
 ----
-@NonNull
-@Override
 public HashMap<TransmittableThreadLocal<Object>, Object> replay(@NonNull HashMap<TransmittableThreadLocal<Object>, Object> captured) {
     final HashMap<TransmittableThreadLocal<Object>, Object> backup = new HashMap<>(holder.get().size());
 
+    // replay的执行环境已经在子线程了，这里的holder就是子线程创建的那一时刻从主线程的holder继承下来的所有
+    // 的TransmittableThreadLocal
     for (final Iterator<TransmittableThreadLocal<Object>> iterator = holder.get().keySet().iterator(); iterator.hasNext(); ) {
         TransmittableThreadLocal<Object> threadLocal = iterator.next();
 
         // backup
-        // 这里调用的是threadLocal的get方法而不是copy，replay的目的是备份父线程的值，防止业务代码在执行时
-        // 修改的threadLocal值在holder中生效
+        // 这里调用的是threadLocal的get方法而不是copy，replay的目的是备份当前线程创建的那一时刻holder中的数据
+        // 用于之后的restore，保证当前线程每次开始执行的时候holder中的的TransmittableThreadLocal对象和
+        // 当前线程创建的那一时刻是一致的
         backup.put(threadLocal, threadLocal.get());
 
         // clear the TTL values that is not in captured
         // avoid the extra TTL values after replay when run task
         // 上面的backup已经备份了holder中所有的threadLocal，这里在发现当前线程的captured中没有当前的threadLocal
-        // 则将其从holder中暂时移除，避免业务代码在执行的时候holder中的threadLocal数量和captured中的threadLocal
-        // 数量不一致
+        // 则将其从holder中暂时移除，避免业务代码在执行的时候感知到已经被remove的无用TransmittableThreadLocal
         // holder是InheritableThreadLocal类型的，所以可以很安全的remove，并在之后进行restore操作而不影响其他
         // 线程
         if (!captured.containsKey(threadLocal)) {
@@ -529,9 +546,80 @@ private static void setTtlValuesTo(@NonNull HashMap<TransmittableThreadLocal<Obj
 }
 ----
 
-ttlTransmittee对象的replay()方法首先通过holder遍历父线程持有的所有ttl对象，逐个调用get()方法对父线程中ttl的值进行备份，之后判断当前子线程captured的ttl对象中是否存在主线程中的ttl，不存在的话则从holder中暂时移除该ttl，这是为了避免子线程运行时其captured的ttl数量和holder中ttl的数量不一致。
+ttlTransmittee对象的replay()方法首先通过holder遍历子线程创建的那一时刻从父线程的holder继承下来的所有ttl对象，逐个调用get()方法对ttl的值进行备份，之后判断当前子线程captured的ttl对象中是否存在遍历到的ttl，不存在的话则从holder中暂时移除该ttl，这是为了过滤掉子线程创建后，capture执行前这段时间，主线程remove掉的TransmittableThreadLocal对象，即下面这种情况：
 
-循环结束后将captured中ttl的值设置到了当前运行的子线程的threadLocal中，并返回主线程holder中的备份，这之后子线程运行业务代码就可以获取到TtlRunnable对象创建的那个时刻获取到的父线程ttl的值。
+[source, java]
+----
+public void test() throws InterruptedException {
+    TransmittableThreadLocal<String> context = new TransmittableThreadLocal<>();
+
+    ExecutorService executorService = Executors.newSingleThreadExecutor();
+    executorService = TtlExecutors.getTtlExecutorService(executorService);
+    // 在父线程中设置
+    context.set("init-value");
+    executorService.submit(() -> {
+        System.out.println("context: " + context.get());
+    });
+
+    // 在父线程中设置
+    context.set("value-set-in-parent");
+    context.remove();
+    TimeUnit.SECONDS.sleep(1);
+    executorService.submit(() -> {
+        System.out.println("context: " + context.get());
+    });
+    executorService.awaitTermination(10, TimeUnit.SECONDS);
+}
+
+/*
+输出：
+context: init-value
+context: null
+ */
+----
+
+如果没有replay()方法中for循环内对captured的过滤，则输出会是：
+----
+context: init-value
+context: init-value（这里输出的是init-value而不是value-set-in-parent，因为context.set("value-set-in-parent")只能更新主线程的值，子线程本来需要依赖capture()感知到这个更新，由于主线程remove了context，所以主线程holder中没有了context这个TransmittableThreadLocal，子线程执行replay()方法时子线程的holder还有context这个TransmittableThreadLocal，并且值是子线程创建的时候主线程context的值，也就是init-value）
+----
+
+没有这层过滤，子线程会感知到主线程已经remove的threadLocal，这是不符合预期的。
+
+replay()方法循环结束后将captured中ttl的值设置到了当前运行的子线程的threadLocal中，并返回子线程holder中的备份，这之后子线程运行业务代码就可以获取到TtlRunnable对象创建的那个时刻获取到的主线程ttl的值。
+
+这里可能有个疑问，holder的作用是保证每个线程维护自己的TransmittableThreadLocal对象及值，那holder一定得是InheritableThreadLocal的类型吗，如果是ThreadLocal类型的可以吗？在大部分情况下是可以的，但是下面这种情况就不行了：
+
+----
+import com.alibaba.ttl.TransmittableThreadLocal;
+import com.alibaba.ttl.TtlRunnable;
+
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class Demo {
+    public static void main(String[] args) throws Exception {
+        final ExecutorService executorService = Executors.newSingleThreadExecutor();
+        final TransmittableThreadLocal<String> ttl = new TransmittableThreadLocal<>();
+        ttl.set("hello");
+
+        executorService.submit(TtlRunnable.get(() -> System.out.println(ttl.get())));
+        Thread.sleep(500);
+
+        new Thread( () -> {
+            // 在new线程中，执行线程池操作
+            final TtlRunnable task = TtlRunnable.get(() -> System.out.println(ttl.get()));
+            executorService.submit(task);
+        }).start();
+        Thread.sleep(500);
+    }
+}
+
+// 期望输出 hello hello。
+// 如果holder使用ThreadLocal，输出的是hello null
+----
+
+如果主线程通过new Thread提交TtlRunnable，那么TtlRunnable就无法获取主线程的ttl了，link:https://github.com/alibaba/transmittable-thread-local/issues/132[相关issue]。
 
 TtlRunnable的run()方法最后执行restore()对replay()方法获取到的备份进行恢复，代码如下：
 ----
@@ -551,17 +639,17 @@ public static void restore(@NonNull Object backup) {
 }
 ----
 
-参数backup就是前面说到的replay()方法的返回值，包含了更新子线程threadLocal之前主线程holder中所有的ttl对象及ttl的值，恢复备份的过程和replay()方法获取备份的过程类似，主要是将backup中所有的ttl恢复到holder中，ttlTransmittee对象的restore()方法代码实现如下：
+参数backup就是前面说到的replay()方法的返回值，包含了更新子线程threadLocal之前子线程holder中所有的ttl对象及ttl的值，恢复备份的过程和replay()方法获取备份的过程类似，主要是将backup中所有的ttl恢复到holder中，ttlTransmittee对象的restore()方法代码实现如下：
 ----
-@Override
 public void restore(@NonNull HashMap<TransmittableThreadLocal<Object>, Object> backup) {
     // call afterExecute callback
     // 调用所有threadlocal的afterExecute方法
     doExecuteCallback(false);
 
     // 这里遍历holder是为了过滤掉在capture方法执行后保存的所有threadLocal中不存在的threadLocal
-    // 这些threadLocal可能是业务方法在执行时put到holder的，这里为了保证capture方法执行前和restore
-    // 方法执行后holder的threadLocal是一致的
+    // 这些threadLocal可能是业务方法在执行时新建了TransmittableThreadLocal对象并调用get/set方法而添加
+    // 到holder的，这些TransmittableThreadLocal对象没必要留在当前线程的holder中，下一次线程运行的时候
+    // 是不需要这些TransmittableThreadLocal对象的
     for (final Iterator<TransmittableThreadLocal<Object>> iterator = holder.get().keySet().iterator(); iterator.hasNext(); ) {
         TransmittableThreadLocal<Object> threadLocal = iterator.next();
 
@@ -575,6 +663,13 @@ public void restore(@NonNull HashMap<TransmittableThreadLocal<Object>, Object> b
 
     // restore TTL values
     // 将backup的值保存到threadlocal中
+    // 通过replay和restore方法也可以发现，子线程的holder中保存的始终是创建的那一时刻从主线程的holder中继
+    // 承下来的TransmittableThreadLocal对象，当主线程执行TransmittableThreadLocal.remove从自己的holder
+    // 中删除了TransmittableThreadLocal对象，那子线程的holder还一直持有这个TransmittableThreadLocal是不
+    // 是就内存泄露了呢，实际上不会，因为holder的value是WeakHashMap的，当TransmittableThreadLocal对象没有
+    // 强引用的时候，是可以被垃圾回收的
     setTtlValuesTo(backup);
 }
 ----
+
+restore方法的作用简单来说就是恢复replay时子线程holder中的ttl，需要注意的是当主线程remove一个ttl后，主线程的holder会删除被remove的ttl，子线程的holder还是会持有这个ttl，但是ttl都是保存在holder的WeakHashMap中，所以是不会影响gc的。
